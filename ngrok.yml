@@ -1,0 +1,21 @@
+# Configuração do ngrok para desenvolvimento
+# Coloque este arquivo em: ~/.ngrok2/ngrok.yml (Linux/Mac) ou %USERPROFILE%\.ngrok2\ngrok.yml (Windows)
+
+version: "2"
+authtoken: YOUR_NGROK_AUTH_TOKEN_HERE
+
+tunnels:
+  checkout-pix:
+    addr: 3000
+    proto: http
+    subdomain: checkout-pix-dev  # Opcional: subdomínio personalizado
+    inspect: true
+    log: stdout
+    
+  # Para HTTPS (recomendado para webhooks)
+  checkout-pix-https:
+    addr: 3000
+    proto: http
+    subdomain: checkout-pix-secure  # Opcional: subdomínio personalizado
+    inspect: true
+    log: stdout
