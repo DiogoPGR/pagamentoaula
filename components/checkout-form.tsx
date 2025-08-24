@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Separator } from "@/components/ui/separator"
-import { CreditCard, QrCode } from "lucide-react"
+import { CreditCard, QrCode, ArrowLeft } from "lucide-react"
 import { PixQRCode } from "@/components/pix-qr-code"
 import { toast } from "@/hooks/use-toast"
 
@@ -36,6 +36,7 @@ export function CheckoutForm() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [pixPayment, setPixPayment] = useState<PixPayment | null>(null)
   const [showQRCode, setShowQRCode] = useState(false)
+  const [paymentMethod, setPaymentMethod] = useState<"pix" | "credit-card">("pix")
 
   const handleInputChange = (field: keyof FormData, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
@@ -43,6 +44,13 @@ export function CheckoutForm() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    
+    if (paymentMethod === "credit-card") {
+      // Redirecionar para a página de cartão de crédito
+      window.location.href = "/credit-card"
+      return
+    }
+    
     setIsProcessing(true)
 
     try {
@@ -97,6 +105,14 @@ export function CheckoutForm() {
       email: "",
       cpf: "",
     })
+  }
+
+  const switchToCreditCard = () => {
+    setPaymentMethod("credit-card")
+  }
+
+  const switchToPix = () => {
+    setPaymentMethod("pix")
   }
 
     // Se o QR Code foi gerado, mostrar apenas ele
@@ -194,7 +210,12 @@ export function CheckoutForm() {
       {/* Header */}
       <div className="text-center mb-8">
         <h1 className="text-3xl font-bold text-foreground mb-2">Finalizar Compra</h1>
-        <p className="text-muted-foreground">Complete seus dados para pagar via PIX</p>
+        <p className="text-muted-foreground">
+          {paymentMethod === "pix" 
+            ? "Complete seus dados para pagar via PIX" 
+            : "Complete seus dados para pagar via Cartão de Crédito"
+          }
+        </p>
       </div>
 
       <div className="grid lg:grid-cols-2 gap-8">
@@ -238,13 +259,62 @@ export function CheckoutForm() {
             {/* Método de Pagamento */}
             <div className="mt-6">
               <h4 className="font-semibold mb-3">Método de Pagamento</h4>
+              
+              {/* Seleção de Método */}
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <button
+                  type="button"
+                  onClick={switchToPix}
+                  className={`p-3 rounded-lg border-2 transition-all ${
+                    paymentMethod === "pix"
+                      ? "border-primary bg-primary/5 text-primary"
+                      : "border-muted hover:border-primary/50"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <QrCode className="h-5 w-5" />
+                    <span className="font-medium">PIX</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">Pagamento instantâneo</p>
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={switchToCreditCard}
+                  className={`p-3 rounded-lg border-2 transition-all ${
+                    paymentMethod === "credit-card"
+                      ? "border-primary bg-primary/5 text-primary"
+                      : "border-muted hover:border-primary/50"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <CreditCard className="h-5 w-5" />
+                    <span className="font-medium">Cartão</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">Parcelado em até 3x</p>
+                </button>
+              </div>
+
+              {/* Método Selecionado */}
               <div className="border border-primary bg-primary/5 rounded-lg p-4">
                 <div className="flex items-center gap-3">
-                  <QrCode className="h-6 w-6 text-primary" />
-                  <div>
-                    <p className="font-medium text-primary">PIX</p>
-                    <p className="text-sm text-muted-foreground">Pagamento instantâneo</p>
-                  </div>
+                  {paymentMethod === "pix" ? (
+                    <>
+                      <QrCode className="h-6 w-6 text-primary" />
+                      <div>
+                        <p className="font-medium text-primary">PIX</p>
+                        <p className="text-sm text-muted-foreground">Pagamento instantâneo</p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <CreditCard className="h-6 w-6 text-primary" />
+                      <div>
+                        <p className="font-medium text-primary">Cartão de Crédito</p>
+                        <p className="text-sm text-muted-foreground">Pagamento seguro e parcelado</p>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -308,10 +378,15 @@ export function CheckoutForm() {
                     <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
                     Processando...
                   </>
-                ) : (
+                ) : paymentMethod === "pix" ? (
                   <>
                     <QrCode className="mr-2 h-5 w-5" />
                     Gerar PIX - R$ 2,00
+                  </>
+                ) : (
+                  <>
+                    <CreditCard className="mr-2 h-5 w-5" />
+                    Finalizar Compra - R$ 2,00
                   </>
                 )}
               </Button>

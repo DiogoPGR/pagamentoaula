@@ -1,33 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { mercadoPagoService } from '@/lib/mercadopago';
 
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const paymentId = searchParams.get('paymentId');
+export const runtime = 'nodejs';
 
-    if (!paymentId) {
+export async function GET(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+
+    // aceita ?id=... ou ?paymentId=...
+    const id =
+      searchParams.get('id') ||
+      searchParams.get('paymentId') ||
+      undefined;
+
+    if (!id) {
       return NextResponse.json(
-        { error: 'ID do pagamento é obrigatório' },
+        { success: false, error: 'ID do pagamento é obrigatório' },
         { status: 400 }
       );
     }
 
-    const status = await mercadoPagoService.getPaymentStatus(paymentId);
+    const details = await mercadoPagoService.getPaymentDetails(id);
 
     return NextResponse.json({
       success: true,
-      status,
-      paymentId,
+      status: details.status,
+      details,
     });
-  } catch (error) {
-    console.error('Erro ao verificar status do pagamento:', error);
-    
+  } catch (err) {
+    console.error('Erro em /api/payment-status:', err);
     return NextResponse.json(
-      { 
-        error: 'Erro interno do servidor',
-        details: error instanceof Error ? error.message : 'Erro desconhecido'
-      },
+      { success: false, error: 'Falha ao consultar status do pagamento' },
       { status: 500 }
     );
   }

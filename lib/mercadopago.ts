@@ -1,12 +1,11 @@
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 
-// Configurar o Mercado Pago com suas credenciais
-// Em produção, use variáveis de ambiente
-const MP_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN || 'YOUR_ACCESS_TOKEN';
+// Em produção, mantenha as chaves apenas no .env(.local)
+const MP_ACCESS_TOKEN =
+  process.env.MERCADOPAGO_ACCESS_TOKEN || 'YOUR_ACCESS_TOKEN';
 
-// Configuração do cliente Mercado Pago
-const client = new MercadoPagoConfig({ 
-  accessToken: MP_ACCESS_TOKEN 
+const client = new MercadoPagoConfig({
+  accessToken: MP_ACCESS_TOKEN,
 });
 
 export interface PaymentData {
@@ -25,78 +24,127 @@ export interface PixPaymentResponse {
 }
 
 export class MercadoPagoService {
-
+  // ---------- PIX ----------
   async createPixPayment(paymentData: PaymentData): Promise<PixPaymentResponse> {
     try {
-      // Criar preferência de pagamento
-      const preference = {
-        items: [
-          {
-            title: 'Produto Digital',
-            description: 'Acesso completo ao conteúdo',
-            quantity: 1,
-            unit_price: paymentData.amount,
-            currency_id: 'BRL',
-          },
-        ],
-        payer: {
-          name: paymentData.name,
-          email: paymentData.email,
-          identification: {
-            type: 'CPF',
-            number: paymentData.cpf.replace(/\D/g, ''), // Remove caracteres não numéricos
-          },
-        },
-        payment_methods: {
-          excluded_payment_types: [
-            { id: 'credit_card' },
-            { id: 'debit_card' },
-            { id: 'bank_transfer' },
-          ],
-          installments: 1,
-        },
-        back_urls: {
-          success: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/success`,
-          failure: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/failure`,
-          pending: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/pending`,
-        },
-        notification_url: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/api/webhook`,
-        auto_return: 'approved',
-        external_reference: `order_${Date.now()}`,
-        expires: true,
-        expiration_date_from: new Date().toISOString(),
-        expiration_date_to: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 horas
-      };
+      const baseUrl =
+        process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+      const externalReference = `order_${Date.now()}`;
 
+      const items = [
+        {
+          title: 'Produto Digital',
+          description: 'Acesso completo ao conteúdo',
+          quantity: 1,
+          unit_price: paymentData.amount,
+          currency_id: 'BRL',
+        },
+      ];
+
+      const [firstName, ...rest] = paymentData.name.trim().split(' ');
+      const lastName = rest.join(' ');
+
+      // Preferência (apenas para manter navegação/back_urls)
       const preferenceClient = new Preference(client);
-      const response = await preferenceClient.create({ body: preference });
-      
-      // Criar pagamento PIX
-      const payment = {
-        transaction_amount: paymentData.amount,
-        description: 'Produto Digital - Acesso completo ao conteúdo',
-        payment_method_id: 'pix',
-        payer: {
-          email: paymentData.email,
-          first_name: paymentData.name.split(' ')[0],
-          last_name: paymentData.name.split(' ').slice(1).join(' '),
-          identification: {
-            type: 'CPF',
-            number: paymentData.cpf.replace(/\D/g, ''),
+      await preferenceClient.create({
+        body: {
+          items,
+          payer: {
+            name: paymentData.name,
+            email: paymentData.email,
+            identification: {
+              type: 'CPF',
+              number: paymentData.cpf.replace(/\D/g, ''),
+            },
+          },
+          metadata: {
+            buyer_email: paymentData.email,
+            order_id: externalReference,
+            customer_name: paymentData.name,
+          },
+          additional_info: {
+            items: items.map((i) => ({
+              title: i.title,
+              quantity: i.quantity,
+              unit_price: i.unit_price,
+            })),
+            payer: {
+              email: paymentData.email,
+              first_name: firstName || paymentData.name,
+              last_name: lastName || '',
+            },
+          },
+          payment_methods: {
+            excluded_payment_types: [
+              { id: 'credit_card' },
+              { id: 'debit_card' },
+              { id: 'bank_transfer' },
+            ],
+            installments: 1,
+          },
+          back_urls: {
+            success: `${baseUrl}/success`,
+            failure: `${baseUrl}/failure`,
+            pending: `${baseUrl}/pending`,
+          },
+          notification_url: `${baseUrl}/api/webhook`,
+          auto_return: 'approved',
+          external_reference: externalReference,
+          expires: true,
+          expiration_date_from: new Date().toISOString(),
+          expiration_date_to: new Date(
+            Date.now() + 24 * 60 * 60 * 1000
+          ).toISOString(),
+        },
+      });
+
+      // Pagamento PIX
+      const paymentClient = new Payment(client);
+      const pixResponse = await paymentClient.create({
+        body: {
+          transaction_amount: paymentData.amount,
+          description: 'Produto Digital - Acesso completo ao conteúdo',
+          payment_method_id: 'pix',
+          payer: {
+            email: paymentData.email,
+            first_name: firstName || paymentData.name,
+            last_name: lastName || '',
+            identification: {
+              type: 'CPF',
+              number: paymentData.cpf.replace(/\D/g, ''),
+            },
+          },
+          external_reference: externalReference,
+          notification_url: `${baseUrl}/api/webhook`,
+          metadata: {
+            buyer_email: paymentData.email,
+            order_id: externalReference,
+            customer_name: paymentData.name,
+          },
+          additional_info: {
+            items: items.map((i) => ({
+              title: i.title,
+              quantity: i.quantity,
+              unit_price: i.unit_price,
+            })),
+            payer: {
+              email: paymentData.email,
+              first_name: firstName || paymentData.name,
+              last_name: lastName || '',
+            },
           },
         },
-        external_reference: response.external_reference,
-      };
-
-      const paymentClient = new Payment(client);
-      const pixResponse = await paymentClient.create({ body: payment });
+      });
 
       return {
-        id: pixResponse.id.toString(),
+        id: String(pixResponse.id),
         status: pixResponse.status,
-        qr_code: pixResponse.point_of_interaction.transaction_data.qr_code,
-        qr_code_base64: pixResponse.point_of_interaction.transaction_data.qr_code_base64,
-        external_reference: response.external_reference,
+        qr_code:
+          pixResponse.point_of_interaction?.transaction_data?.qr_code || '',
+        qr_code_base64:
+          pixResponse.point_of_interaction?.transaction_data?.qr_code_base64 ||
+          '',
+        external_reference: externalReference,
       };
     } catch (error) {
       console.error('Erro ao criar pagamento PIX:', error);
@@ -104,6 +152,59 @@ export class MercadoPagoService {
     }
   }
 
+  // ---------- CARTÃO ----------
+  async createCardPayment(args: {
+    token: string;
+    issuer_id?: string;
+    payment_method_id: string; // ex: visa, master
+    installments?: number;
+    amount: number;
+    description?: string;
+    external_reference?: string;
+    payer: {
+      email: string;
+      identification: { type: 'CPF' | 'CNPJ'; number: string };
+    };
+  }) {
+    try {
+      const baseUrl =
+        process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+
+      const paymentClient = new Payment(client);
+      const resp = await paymentClient.create({
+        body: {
+          token: args.token,
+          issuer_id: args.issuer_id,
+          payment_method_id: args.payment_method_id,
+          transaction_amount: Number(args.amount),
+          installments: Number(args.installments || 1),
+          description: args.description || 'Pagamento com cartão',
+          external_reference:
+            args.external_reference || `order_${Date.now()}`,
+          capture: true,
+          payer: {
+            email: args.payer.email,
+            identification: {
+              type: args.payer.identification.type,
+              number: args.payer.identification.number.replace(/\D/g, ''),
+            },
+          },
+          notification_url: `${baseUrl}/api/webhook`,
+          metadata: {
+            buyer_email: args.payer.email,
+            order_id: args.external_reference,
+          },
+          // additional_info também pode ser enviado se quiser detalhar itens/cliente
+        },
+      });
+      return resp;
+    } catch (error) {
+      console.error('Erro ao criar pagamento com cartão:', error);
+      throw new Error('Falha ao processar pagamento com cartão');
+    }
+  }
+
+  // ---------- STATUS ----------
   async getPaymentStatus(paymentId: string): Promise<string> {
     try {
       const paymentClient = new Payment(client);
@@ -115,6 +216,7 @@ export class MercadoPagoService {
     }
   }
 
+  // ---------- DETALHES ----------
   async getPaymentDetails(paymentId: string): Promise<any> {
     try {
       const paymentClient = new Payment(client);
@@ -129,8 +231,10 @@ export class MercadoPagoService {
         date_created: response.date_created,
         date_last_updated: response.date_last_updated,
         payer: response.payer,
-        // Para pagamentos PIX
-        point_of_interaction: response.point_of_interaction
+        additional_info: (response as any).additional_info,
+        metadata: (response as any).metadata,
+        order: (response as any).order,
+        point_of_interaction: response.point_of_interaction,
       };
     } catch (error) {
       console.error('Erro ao buscar detalhes do pagamento:', error);
