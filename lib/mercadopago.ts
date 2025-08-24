@@ -1,12 +1,43 @@
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 
-// Em produção, mantenha as chaves apenas no .env(.local)
 const MP_ACCESS_TOKEN =
   process.env.MERCADOPAGO_ACCESS_TOKEN || 'YOUR_ACCESS_TOKEN';
 
-const client = new MercadoPagoConfig({
-  accessToken: MP_ACCESS_TOKEN,
-});
+const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
+
+// ---- Helper: resolve e valida a URL do webhook (apenas https e sem localhost)
+function getNotificationUrl(): string | undefined {
+  const rawEnv = (process.env.MP_NOTIFICATION_URL || '').trim();
+  if (rawEnv) {
+    try {
+      const u = new URL(rawEnv);
+      if (u.protocol !== 'https:') return undefined; // MP exige https
+      // ok
+      return u.href;
+    } catch {
+      return undefined;
+    }
+  }
+
+  const base = (process.env.NEXT_PUBLIC_BASE_URL || '').trim();
+  if (base) {
+    try {
+      const u = new URL(base);
+      if (
+        u.protocol === 'https:' &&
+        u.hostname !== 'localhost' &&
+        u.hostname !== '127.0.0.1' &&
+        u.hostname !== '::1'
+      ) {
+        return `${u.origin}/api/webhook`;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return undefined;
+}
 
 export interface PaymentData {
   name: string;
@@ -14,7 +45,6 @@ export interface PaymentData {
   cpf: string;
   amount: number;
 }
-
 export interface PixPaymentResponse {
   id: string;
   status: string;
@@ -24,13 +54,15 @@ export interface PixPaymentResponse {
 }
 
 export class MercadoPagoService {
-  // ---------- PIX ----------
+  // PIX
   async createPixPayment(paymentData: PaymentData): Promise<PixPaymentResponse> {
     try {
       const baseUrl =
         process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-      const externalReference = `order_${Date.now()}`;
+      const notificationUrl = getNotificationUrl();
+      console.log('[MP] notificationUrl usada (PIX):', notificationUrl);
 
+      const externalReference = `order_${Date.now()}`;
       const items = [
         {
           title: 'Produto Digital',
@@ -44,7 +76,7 @@ export class MercadoPagoService {
       const [firstName, ...rest] = paymentData.name.trim().split(' ');
       const lastName = rest.join(' ');
 
-      // Preferência (apenas para manter navegação/back_urls)
+      // Preferência (para navegação/back_urls)
       const preferenceClient = new Preference(client);
       await preferenceClient.create({
         body: {
@@ -87,7 +119,7 @@ export class MercadoPagoService {
             failure: `${baseUrl}/failure`,
             pending: `${baseUrl}/pending`,
           },
-          notification_url: `${baseUrl}/api/webhook`,
+          ...(notificationUrl ? { notification_url: notificationUrl } : {}),
           auto_return: 'approved',
           external_reference: externalReference,
           expires: true,
@@ -115,7 +147,7 @@ export class MercadoPagoService {
             },
           },
           external_reference: externalReference,
-          notification_url: `${baseUrl}/api/webhook`,
+          ...(notificationUrl ? { notification_url: notificationUrl } : {}),
           metadata: {
             buyer_email: paymentData.email,
             order_id: externalReference,
@@ -152,11 +184,11 @@ export class MercadoPagoService {
     }
   }
 
-  // ---------- CARTÃO ----------
+  // CARTÃO
   async createCardPayment(args: {
     token: string;
     issuer_id?: string;
-    payment_method_id: string; // ex: visa, master
+    payment_method_id: string;
     installments?: number;
     amount: number;
     description?: string;
@@ -167,8 +199,8 @@ export class MercadoPagoService {
     };
   }) {
     try {
-      const baseUrl =
-        process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+      const notificationUrl = getNotificationUrl();
+      console.log('[MP] notificationUrl usada (CARD):', notificationUrl);
 
       const paymentClient = new Payment(client);
       const resp = await paymentClient.create({
@@ -189,12 +221,11 @@ export class MercadoPagoService {
               number: args.payer.identification.number.replace(/\D/g, ''),
             },
           },
-          notification_url: `${baseUrl}/api/webhook`,
+          ...(notificationUrl ? { notification_url: notificationUrl } : {}),
           metadata: {
             buyer_email: args.payer.email,
             order_id: args.external_reference,
           },
-          // additional_info também pode ser enviado se quiser detalhar itens/cliente
         },
       });
       return resp;
@@ -204,7 +235,6 @@ export class MercadoPagoService {
     }
   }
 
-  // ---------- STATUS ----------
   async getPaymentStatus(paymentId: string): Promise<string> {
     try {
       const paymentClient = new Payment(client);
@@ -216,7 +246,6 @@ export class MercadoPagoService {
     }
   }
 
-  // ---------- DETALHES ----------
   async getPaymentDetails(paymentId: string): Promise<any> {
     try {
       const paymentClient = new Payment(client);
