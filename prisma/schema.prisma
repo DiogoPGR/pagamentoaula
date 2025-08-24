@@ -1,0 +1,87 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// Tabela principal de pagamentos
+model Payment {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // IDs do Mercado Pago
+  mercadopagoId     String   @unique
+  externalReference String   @unique
+  
+  // Informações do pagamento
+  amount            Decimal  @db.Decimal(10, 2)
+  currency          String   @default("BRL")
+  status            PaymentStatus
+  paymentMethod     String
+  
+  // Informações do pagador
+  payerName         String
+  payerEmail        String
+  payerCpf          String
+  
+  // Metadados e informações adicionais
+  description       String?
+  items             Json?    // Array de itens em JSON
+  
+  // URLs e referências
+  receiptUrl        String?
+  successUrl        String?
+  failureUrl        String?
+  
+  // Timestamps do Mercado Pago
+  mpCreatedAt       DateTime?
+  mpUpdatedAt       DateTime?
+  
+  // Status específicos do Mercado Pago
+  mpStatusDetail    String?
+  mpRejectionReason String?
+  
+  // Relacionamentos
+  webhookEvents     WebhookEvent[]
+  
+  @@map("payments")
+}
+
+// Eventos de webhook para auditoria
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  
+  // Referência ao pagamento
+  paymentId   String
+  payment     Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  
+  // Dados do webhook
+  eventType   String   // payment.created, payment.updated, etc.
+  eventData   Json     // Dados completos do webhook
+  
+  // Status do processamento
+  processed   Boolean  @default(false)
+  processedAt DateTime?
+  error       String?
+  
+  @@map("webhook_events")
+}
+
+// Enum para status dos pagamentos
+enum PaymentStatus {
+  PENDING     // Pendente
+  APPROVED    // Aprovado
+  REJECTED    // Recusado
+  CANCELLED   // Cancelado
+  IN_PROCESS  // Em processamento
+  REFUNDED    // Reembolsado
+  CHARGED_BACK // Contestado
+} 

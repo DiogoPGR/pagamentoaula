@@ -269,6 +269,7 @@ export class MercadoPagoService {
       console.error('Erro ao buscar detalhes do pagamento:', error);
       throw new Error('Falha ao buscar detalhes do pagamento');
     }
+    
   }
 }
 
