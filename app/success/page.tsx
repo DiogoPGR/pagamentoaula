@@ -407,15 +407,7 @@ export default function SuccessPage() {
         </div>
       )}
 
-      {/* Detalhes técnicos (opcional) */}
-      {details && (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-          <h3 className="font-semibold mb-2 text-sm text-gray-700">Detalhes Técnicos</h3>
-          <pre className="overflow-auto text-xs text-gray-600">
-{JSON.stringify(details, null, 2)}
-        </pre>
-        </div>
-      )}
+      
 
       {/* Informações adicionais */}
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-blue-800">

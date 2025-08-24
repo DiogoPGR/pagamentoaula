@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { mercadoPagoService } from '@/lib/mercadopago';
+import { paymentService } from '@/prisma/prisma.config';
 
 export const runtime = 'nodejs';
 
@@ -22,88 +23,116 @@ export async function GET(req: NextRequest) {
 
     console.log(`[PAYMENT-STATUS] Consultando status do pagamento ID: ${id}`);
 
-    const details = await mercadoPagoService.getPaymentDetails(id);
+    // Buscar no banco de dados primeiro
+    let dbPayment = null;
+    try {
+      dbPayment = await paymentService.getPaymentByMercadoPagoId(id);
+      if (dbPayment) {
+        console.log(`[PAYMENT-STATUS] Pagamento encontrado no banco:`, {
+          id: dbPayment.id,
+          status: dbPayment.status,
+          amount: dbPayment.amount,
+          payerName: dbPayment.payerName,
+        });
+      }
+    } catch (dbError) {
+      console.log(`[PAYMENT-STATUS] Erro ao buscar no banco:`, dbError);
+      // Continuar com consulta ao Mercado Pago
+    }
 
-    console.log(`[PAYMENT-STATUS] Status obtido para ${id}:`, {
-      status: details.status,
-      external_reference: details.external_reference,
-      amount: details.transaction_amount,
+    // Buscar no Mercado Pago para dados atualizados
+    const mpDetails = await mercadoPagoService.getPaymentDetails(id);
+
+    console.log(`[PAYMENT-STATUS] Status obtido do MP para ${id}:`, {
+      status: mpDetails.status,
+      external_reference: mpDetails.external_reference,
+      amount: mpDetails.transaction_amount,
     });
 
-    // Variáveis para informações de rejeição
+    // Determinar o tipo específico de rejeição
     let rejectionReason = 'Erro geral no processamento';
     let rejectionType = 'general_error';
 
-    // Adicionar informações extras para rejeições
-    if (details.status === 'rejected') {
-      // Detectar o motivo específico da rejeição
-      
+    if (mpDetails.status === 'rejected') {
       // Verificar se é por quantia insuficiente
-      if ((details as any).status_detail === 'cc_rejected_insufficient_amount' || 
-          (details as any).rejection_reason === 'cc_rejected_insufficient_amount' ||
-          (details as any).status_detail === 'insufficient_amount' ||
-          (details as any).rejection_reason === 'insufficient_amount') {
+      if ((mpDetails as any).status_detail === 'cc_rejected_insufficient_amount' || 
+          (mpDetails as any).rejection_reason === 'cc_rejected_insufficient_amount' ||
+          (mpDetails as any).status_detail === 'insufficient_amount' ||
+          (mpDetails as any).rejection_reason === 'insufficient_amount') {
         rejectionReason = 'Quantia insuficiente';
         rejectionType = 'insufficient_amount';
       }
       // Verificar outros tipos comuns de rejeição
-      else if ((details as any).status_detail === 'cc_rejected_bad_filled_card_number' ||
-               (details as any).rejection_reason === 'cc_rejected_bad_filled_card_number') {
+      else if ((mpDetails as any).status_detail === 'cc_rejected_bad_filled_card_number' ||
+               (mpDetails as any).rejection_reason === 'cc_rejected_bad_filled_card_number') {
         rejectionReason = 'Número do cartão inválido';
         rejectionType = 'invalid_card_number';
       }
-      else if ((details as any).status_detail === 'cc_rejected_bad_filled_date' ||
-               (details as any).rejection_reason === 'cc_rejected_bad_filled_date') {
+      else if ((mpDetails as any).status_detail === 'cc_rejected_bad_filled_date' ||
+               (mpDetails as any).rejection_reason === 'cc_rejected_bad_filled_date') {
         rejectionReason = 'Data de validade inválida';
         rejectionType = 'invalid_expiry_date';
       }
-      else if ((details as any).status_detail === 'cc_rejected_bad_filled_other' ||
-               (details as any).rejection_reason === 'cc_rejected_bad_filled_other') {
+      else if ((mpDetails as any).status_detail === 'cc_rejected_bad_filled_other' ||
+               (mpDetails as any).rejection_reason === 'cc_rejected_bad_filled_other') {
         rejectionReason = 'Dados do cartão incorretos';
         rejectionType = 'invalid_card_data';
       }
-      else if ((details as any).status_detail === 'cc_rejected_call_for_authorize' ||
-               (details as any).rejection_reason === 'cc_rejected_call_for_authorize') {
+      else if ((mpDetails as any).status_detail === 'cc_rejected_call_for_authorize' ||
+               (mpDetails as any).rejection_reason === 'cc_rejected_call_for_authorize') {
         rejectionReason = 'Autorização necessária';
         rejectionType = 'authorization_required';
       }
-      else if ((details as any).status_detail === 'cc_rejected_insufficient_amount' ||
-               (details as any).rejection_reason === 'cc_rejected_insufficient_amount') {
+      else if ((mpDetails as any).status_detail === 'cc_rejected_insufficient_amount' ||
+               (mpDetails as any).rejection_reason === 'cc_rejected_insufficient_amount') {
         rejectionReason = 'Limite insuficiente';
         rejectionType = 'insufficient_limit';
       }
 
       console.log(`[PAYMENT-STATUS] 🔍 Detalhes da rejeição para ${id}:`, {
-        paymentMethod: details.payment_method_id,
-        statusDetail: (details as any).status_detail || 'unknown',
+        paymentMethod: mpDetails.payment_method_id,
+        statusDetail: (mpDetails as any).status_detail || 'unknown',
         rejectionReason: rejectionReason,
         rejectionType: rejectionType,
-        cardholderName: details?.payer?.first_name ? 
-          `${details.payer.first_name} ${details.payer.last_name || ''}`.trim() : 
+        cardholderName: mpDetails?.payer?.first_name ? 
+          `${mpDetails.payer.first_name} ${mpDetails.payer.last_name || ''}`.trim() : 
           'N/A',
-        buyerEmail: details?.metadata?.buyer_email || details?.payer?.email || 'N/A',
+        buyerEmail: mpDetails?.metadata?.buyer_email || mpDetails?.payer?.email || 'N/A',
       });
     }
 
-    return NextResponse.json({
+    // Preparar resposta combinando dados do banco e do MP
+    const response = {
       success: true,
-      status: details.status,
-      details,
+      status: mpDetails.status,
+      details: mpDetails,
       checked_at: new Date().toISOString(),
-      // Adicionar informações extras para rejeições
-      rejection_info: details.status === 'rejected' ? {
+      // Dados do banco de dados
+      db_payment: dbPayment ? {
+        id: dbPayment.id,
+        status: dbPayment.status,
+        payerName: dbPayment.payerName,
+        payerEmail: dbPayment.payerEmail,
+        amount: dbPayment.amount,
+        createdAt: dbPayment.createdAt,
+        updatedAt: dbPayment.updatedAt,
+      } : null,
+      // Informações extras para rejeições
+      rejection_info: mpDetails.status === 'rejected' ? {
         reason: rejectionReason,
         type: rejectionType,
-        detail: (details as any).status_detail || 'unknown',
-        payment_method: details.payment_method_id,
-        cardholder_name: details?.payer?.first_name ? 
-          `${details.payer.first_name} ${details.payer.last_name || ''}`.trim() : 
+        detail: (mpDetails as any).status_detail || 'unknown',
+        payment_method: mpDetails.payment_method_id,
+        cardholder_name: mpDetails?.payer?.first_name ? 
+          `${mpDetails.payer.first_name} ${mpDetails.payer.last_name || ''}`.trim() : 
           'N/A',
-        buyer_email: details?.metadata?.buyer_email || details?.payer?.email || 'N/A',
-        original_status_detail: (details as any).status_detail || 'unknown',
-        original_rejection_reason: (details as any).rejection_reason || 'unknown',
+        buyer_email: mpDetails?.metadata?.buyer_email || mpDetails?.payer?.email || 'N/A',
+        original_status_detail: (mpDetails as any).status_detail || 'unknown',
+        original_rejection_reason: (mpDetails as any).rejection_reason || 'unknown',
       } : null,
-    });
+    };
+
+    return NextResponse.json(response);
   } catch (err) {
     console.error('[PAYMENT-STATUS] Erro ao consultar status:', err);
     return NextResponse.json(

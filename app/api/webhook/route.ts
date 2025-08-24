@@ -1,25 +1,69 @@
+// app/api/webhook/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { mercadoPagoService } from '@/lib/mercadopago';
 import { sendPaymentConfirmationEmail } from '@/lib/mailer';
+import { paymentService } from '@/prisma/prisma.config';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+// --- Utils -------------------------------------------------------------------
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function isValidEmail(email?: string | null) {
+  if (!email) return false;
+  const e = String(email).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return false;
+  // evita placeholders
+  if (e.endsWith('@example.com')) return false;
+  if (e === 'cliente@example.com' || e === 'cliente@exemplo.com') return false;
+  return true;
 }
 
+function pickBuyerEmail(details: any): string | undefined {
+  const a =
+    details?.metadata?.buyer_email ||
+    details?.additional_info?.payer?.email ||
+    details?.payer?.email;
+  return isValidEmail(a) ? a : undefined;
+}
+
+function pickName(details: any): string | undefined {
+  const fromPayer =
+    [details?.payer?.first_name, details?.payer?.last_name]
+      .filter(Boolean)
+      .join(' ')
+      .trim() || undefined;
+  return fromPayer || details?.metadata?.customer_name || undefined;
+}
+
+function pickItems(details: any) {
+  const arr = Array.isArray(details?.additional_info?.items)
+    ? details.additional_info.items
+    : [];
+  return arr.map((it: any) => ({
+    title: it.title,
+    quantity: Number(it.quantity || 1),
+    unit_price: Number(it.unit_price || it.unitPrice || 0),
+  }));
+}
+
+// Idempotência simples para evitar e-mail duplicado em reentregas rápidas
+const sentMap = new Map<string, number>(); // key: paymentId, value: timestamp
+function markSent(id: string) {
+  sentMap.set(id, Date.now());
+}
+function wasRecentlySent(id: string, ms = 5 * 60 * 1000) {
+  const t = sentMap.get(id);
+  return t ? Date.now() - t < ms : false;
+}
+
+// --- Handlers ----------------------------------------------------------------
 export async function POST(req: NextRequest) {
-  // Alguns webhooks chegam sem JSON válido; tratamos isso.
   let body: any = null;
-  try {
-    body = await req.json();
-  } catch {
-    body = null;
-  }
+  try { body = await req.json(); } catch { body = null; }
 
   const url = new URL(req.url);
-  // MP pode mandar "type", "topic" ou "action" (ex.: payment.updated)
   const type =
     body?.type ||
     body?.action ||
@@ -28,271 +72,235 @@ export async function POST(req: NextRequest) {
     url.searchParams.get('action') ||
     '';
 
-  // O id do pagamento pode vir em body.data.id, ?data.id=... ou ?id=...
   const paymentId =
     body?.data?.id ||
     url.searchParams.get('data.id') ||
     url.searchParams.get('id') ||
     null;
 
-  // Log detalhado para debug
-  console.log('[WEBHOOK] ===== NOVO WEBHOOK RECEBIDO =====');
-  console.log('[WEBHOOK] type:', type);
-  console.log('[WEBHOOK] paymentId:', paymentId);
-  console.log('[WEBHOOK] body completo:', JSON.stringify(body, null, 2));
-  console.log('[WEBHOOK] URL params:', Object.fromEntries(url.searchParams.entries()));
+  console.log('[WEBHOOK] ▶️ recebido', { type, paymentId, qs: Object.fromEntries(url.searchParams.entries()) });
 
-  const isPayment =
-    (typeof type === 'string' && type.includes('payment')) || !!paymentId;
-
+  // Ignora eventos que não são de pagamento
+  const isPayment = (typeof type === 'string' && type.includes('payment')) || !!paymentId;
   if (!isPayment) {
-    console.log('[WEBHOOK] Não é notificação de pagamento - ignorando');
-    // Não é notificação de pagamento; apenas ACK para evitar re-tentativas
-    return NextResponse.json(
-      { success: true, message: 'Webhook recebido (não é payment)' },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, message: 'ignorado (não é payment)' }, { status: 200 });
   }
-
   if (!paymentId) {
-    console.log('[WEBHOOK] Payment sem ID - ignorando');
-    // Sem ID — não dá para consultar; ainda assim responda 200 para evitar flood
-    return NextResponse.json(
-      { success: false, message: 'Payment sem id' },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: false, message: 'paymentId ausente' }, { status: 200 });
   }
 
-  console.log('[WEBHOOK] Processando pagamento ID:', paymentId);
-
-  // Consulta com pequenas re-tentativas (às vezes o MP ainda não propagou o pagamento)
+  // Busca detalhes com backoff leve (propagação do MP pode demorar alguns ms)
   const maxAttempts = 3;
   let details: any = null;
-  let attempt = 0;
-  let lastErr: any = null;
-
-  while (attempt < maxAttempts) {
-    attempt++;
-    console.log(`[WEBHOOK] Tentativa ${attempt}/${maxAttempts} de obter detalhes do payment`);
-    
+  for (let i = 1; i <= maxAttempts; i++) {
     try {
       details = await mercadoPagoService.getPaymentDetails(paymentId);
-      if (details) {
-        console.log(`[WEBHOOK] Detalhes obtidos na tentativa ${attempt}:`, {
-          id: details.id,
-          status: details.status,
-          external_reference: details.external_reference,
-        });
-        break;
-      }
-    } catch (e) {
-      lastErr = e;
-      console.log(`[WEBHOOK] Erro na tentativa ${attempt}:`, e);
-      if (attempt < maxAttempts) {
-        console.log(`[WEBHOOK] Aguardando ${350 * attempt}ms antes da próxima tentativa...`);
-        await sleep(350 * attempt); // backoff leve
-      }
+      if (details) break;
+    } catch (err) {
+      console.warn(`[WEBHOOK] tentativa ${i} falhou`, err);
+      if (i < maxAttempts) await sleep(300 * i);
     }
   }
-
   if (!details) {
-    console.error('[WEBHOOK] Falha ao obter detalhes do payment após todas as tentativas:', paymentId, lastErr);
-    return NextResponse.json(
-      { success: false, error: 'Não foi possível obter detalhes do pagamento' },
-      { status: 200 }
-    );
+    console.error('[WEBHOOK] ❌ sem detalhes do pagamento', paymentId);
+    return NextResponse.json({ ok: false, message: 'sem detalhes' }, { status: 200 });
   }
 
-  console.log('[WEBHOOK] ===== DETALHES FINAIS DO PAGAMENTO =====');
-  console.log('[WEBHOOK] payment details:', {
+  console.log('[WEBHOOK] ℹ️ detalhes', {
     id: details.id,
     status: details.status,
+    status_detail: (details as any).status_detail,
     external_reference: details.external_reference,
-    transaction_amount: details.transaction_amount,
-    payment_method_id: details.payment_method_id,
-    date_created: details.date_created,
-    date_last_updated: details.date_last_updated,
   });
 
-  // === SUA LÓGICA DE NEGÓCIO ===
-  // 1) Atualize o banco (pedido → pago) usando external_reference / id
-  //    Exemplo (Prisma):
-  // await prisma.order.update({
-  //   where: { externalRef: details.external_reference },
-  //   data: {
-  //     status: 'PAID',
-  //     paymentId: String(details.id),
-  //     paidAt: new Date(),
-  //   },
-  // });
-
-  // 2) Se aprovado, enviar e-mail de confirmação
-  if (details.status === 'approved') {
-    console.log('[WEBHOOK] 🎉 Pagamento APROVADO! Enviando e-mail de confirmação...');
+  // === SALVAR/ATUALIZAR NO BANCO DE DADOS ===
+  let dbPayment: any = null;
+  let webhookEvent: any = null;
+  
+  try {
+    // Verificar se o pagamento já existe no banco
+    dbPayment = await paymentService.getPaymentByMercadoPagoId(paymentId);
     
-    try {
-      const buyerEmail =
-        details?.metadata?.buyer_email ||
-        details?.payer?.email ||
-        details?.additional_info?.payer?.email;
-
-      const orderId =
-        details?.external_reference || details?.metadata?.order_id || String(details.id);
-
-      const items = Array.isArray(details?.additional_info?.items)
-        ? details.additional_info.items.map((it: any) => ({
-            title: it.title,
-            quantity: Number(it.quantity || 1),
-            unit_price: Number(it.unit_price || it.unitPrice || 0),
-          }))
-        : [];
-
-      const total = Number(details?.transaction_amount || 0);
-
-      console.log('[WEBHOOK] Dados para e-mail:', {
-        buyerEmail,
-        orderId,
-        total,
-        itemsCount: items.length,
-      });
-
-      if (buyerEmail) {
-        const emailResult = await sendPaymentConfirmationEmail({
-          to: buyerEmail,
-          name: details?.payer?.first_name
-            ? `${details.payer.first_name} ${details.payer.last_name || ''}`.trim()
-            : undefined,
-          orderId,
-          amount: total,
-          items,
-          receiptUrl: details?.point_of_interaction?.transaction_data?.ticket_url,
-        });
-        
-        console.log('[WEBHOOK] ✅ E-mail enviado com sucesso:', {
-          messageId: emailResult.messageId,
-          previewUrl: emailResult.previewUrl,
-        });
-      } else {
-        console.warn('[WEBHOOK] ⚠️ buyerEmail não encontrado para envio de e-mail.');
+    if (!dbPayment) {
+      // Pagamento não existe - criar novo com status correto
+      console.log('[WEBHOOK] 🆕 Criando novo pagamento no banco de dados...');
+      
+      // Extrair dados do pagador com fallbacks melhores
+      let payerName = 'Nome não informado';
+      let payerEmail = 'email@nao.informado';
+      let payerCpf = 'CPF não informado';
+      
+      // Nome: tentar várias fontes
+      if (details?.payer?.first_name || details?.payer?.last_name) {
+        payerName = [details.payer.first_name, details.payer.last_name]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+      } else if (details?.metadata?.customer_name) {
+        payerName = details.metadata.customer_name;
+      } else if (details?.additional_info?.payer?.first_name) {
+        payerName = details.additional_info.payer.first_name;
       }
-    } catch (e) {
-      console.error('[WEBHOOK] ❌ Erro ao enviar e-mail de confirmação:', e);
-    }
-  } else if (details.status === 'rejected') {
-    // 3) Se rejeitado, logar detalhes da rejeição
-    console.log('[WEBHOOK] ❌ Pagamento REJEITADO! Analisando motivo...');
-    
-    // Detectar o motivo específico da rejeição
-    let rejectionReason = 'Erro geral no processamento';
-    let rejectionType = 'general_error';
-    
-    // Verificar se é por quantia insuficiente
-    if ((details as any).status_detail === 'cc_rejected_insufficient_amount' || 
-        (details as any).rejection_reason === 'cc_rejected_insufficient_amount' ||
-        (details as any).status_detail === 'insufficient_amount' ||
-        (details as any).rejection_reason === 'insufficient_amount') {
-      rejectionReason = 'Quantia insuficiente';
-      rejectionType = 'insufficient_amount';
-    }
-    // Verificar outros tipos comuns de rejeição
-    else if ((details as any).status_detail === 'cc_rejected_bad_filled_card_number' ||
-             (details as any).rejection_reason === 'cc_rejected_bad_filled_card_number') {
-      rejectionReason = 'Número do cartão inválido';
-      rejectionType = 'invalid_card_number';
-    }
-    else if ((details as any).status_detail === 'cc_rejected_bad_filled_date' ||
-             (details as any).rejection_reason === 'cc_rejected_bad_filled_date') {
-      rejectionReason = 'Data de validade inválida';
-      rejectionType = 'invalid_expiry_date';
-    }
-    else if ((details as any).status_detail === 'cc_rejected_bad_filled_other' ||
-             (details as any).rejection_reason === 'cc_rejected_bad_filled_other') {
-      rejectionReason = 'Dados do cartão incorretos';
-      rejectionType = 'invalid_card_data';
-    }
-    else if ((details as any).status_detail === 'cc_rejected_call_for_authorize' ||
-             (details as any).rejection_reason === 'cc_rejected_call_for_authorize') {
-      rejectionReason = 'Autorização necessária';
-      rejectionType = 'authorization_required';
-    }
-    else if ((details as any).status_detail === 'cc_rejected_insufficient_amount' ||
-             (details as any).rejection_reason === 'cc_rejected_insufficient_amount') {
-      rejectionReason = 'Limite insuficiente';
-      rejectionType = 'insufficient_limit';
-    }
-    
-    // Extrair informações sobre a rejeição
-    const rejectionDetails = {
-      paymentId: details.id,
-      externalReference: details.external_reference,
-      amount: details.transaction_amount,
-      paymentMethod: details.payment_method_id,
-      statusDetail: (details as any).status_detail || 'unknown',
-      cardholderName: details?.payer?.first_name ? 
-        `${details.payer.first_name} ${details.payer.last_name || ''}`.trim() : 
-        'N/A',
-      buyerEmail: details?.metadata?.buyer_email || details?.payer?.email || 'N/A',
-      rejectionReason: rejectionReason,
-      rejectionType: rejectionType,
-      originalStatusDetail: (details as any).status_detail || 'unknown',
-      originalRejectionReason: (details as any).rejection_reason || 'unknown',
-      dateRejected: new Date().toISOString(),
-    };
-    
-    console.log('[WEBHOOK] Detalhes da rejeição:', rejectionDetails);
-    
-    // Log específico para quantia insuficiente
-    if (rejectionType === 'insufficient_amount') {
-      console.log('[WEBHOOK] 💳 REJEIÇÃO POR QUANTIA INSUFICIENTE!');
-      console.log('[WEBHOOK] - Valor da transação:', details.transaction_amount);
-      console.log('[WEBHOOK] - Método de pagamento:', details.payment_method_id);
-      console.log('[WEBHOOK] - Portador:', rejectionDetails.cardholderName);
-      console.log('[WEBHOOK] - E-mail:', rejectionDetails.buyerEmail);
-    }
-    
-    // Aqui você pode implementar:
-    // - Notificação para a equipe de suporte
-    // - Atualização do status no banco de dados
-    // - Envio de e-mail informando sobre a rejeição
-    // - Log para análise de fraudes
-    
-    console.log('[WEBHOOK] 💡 Ações recomendadas para rejeição:');
-    if (rejectionType === 'insufficient_amount') {
-      console.log('[WEBHOOK] - Verificar limite disponível no cartão');
-      console.log('[WEBHOOK] - Sugerir pagamento em parcelas');
-      console.log('[WEBHOOK] - Oferecer outras formas de pagamento');
+      
+      // Email: tentar várias fontes
+      if (details?.metadata?.buyer_email) {
+        payerEmail = details.metadata.buyer_email;
+      } else if (details?.payer?.email) {
+        payerEmail = details.payer.email;
+      } else if (details?.additional_info?.payer?.email) {
+        payerEmail = details.additional_info.payer.email;
+      }
+      
+      // CPF: tentar várias fontes
+      if (details?.payer?.identification?.number) {
+        payerCpf = details.payer.identification.number;
+      } else if (details?.metadata?.payer_cpf) {
+        payerCpf = details.metadata.payer_cpf;
+      } else if (details?.additional_info?.payer?.identification?.number) {
+        payerCpf = details.additional_info.payer.identification.number;
+      }
+      
+      // Log dos dados extraídos
+      console.log('[WEBHOOK] 📋 Dados extraídos do pagador:', {
+        name: payerName,
+        email: payerEmail,
+        cpf: payerCpf,
+        rawPayer: details?.payer,
+        rawMetadata: details?.metadata,
+        rawAdditionalInfo: details?.additional_info,
+      });
+      
+      // Extrair itens
+      const items = pickItems(details);
+      
+      // Criar pagamento no banco com status correto do MP
+      dbPayment = await paymentService.createPayment({
+        mercadopagoId: paymentId,
+        externalReference: details.external_reference || `order_${Date.now()}`,
+        amount: Number(details.transaction_amount || 0),
+        paymentMethod: details.payment_method_id || 'unknown',
+        payerName,
+        payerEmail,
+        payerCpf: payerCpf.replace(/\D/g, ''),
+        description: details.description || 'Pagamento via Mercado Pago',
+        items: items.length > 0 ? items : undefined,
+        // Usar o status real do Mercado Pago, não PENDING
+        initialStatus: details.status,
+      });
+      
+      console.log('[WEBHOOK] ✅ Pagamento criado no banco com status:', details.status);
+      console.log('[WEBHOOK] 📊 Status salvo no banco:', dbPayment.status);
+      console.log('[WEBHOOK] 👤 Dados salvos:', {
+        name: dbPayment.payerName,
+        email: dbPayment.payerEmail,
+        cpf: dbPayment.payerCpf,
+      });
     } else {
-      console.log('[WEBHOOK] - Verificar dados do cartão');
-      console.log('[WEBHOOK] - Confirmar limite disponível');
-      console.log('[WEBHOOK] - Validar informações do pagador');
-      console.log('[WEBHOOK] - Verificar se não é uma tentativa de fraude');
+      // Pagamento já existe - atualizar status
+      console.log('[WEBHOOK] 🔄 Atualizando pagamento existente no banco...');
+      console.log('[WEBHOOK] 📊 Status atual no banco:', dbPayment.status);
+      console.log('[WEBHOOK] 📊 Status do MP:', details.status);
+      
+      await paymentService.updatePaymentStatus(paymentId, details.status, {
+        status_detail: (details as any).status_detail,
+        rejection_reason: (details as any).rejection_reason,
+        date_last_updated: details.date_last_updated,
+      });
+      
+      console.log('[WEBHOOK] ✅ Status atualizado no banco para:', details.status);
     }
     
-  } else if (details.status === 'cancelled') {
-    console.log('[WEBHOOK] ⏹️ Pagamento CANCELADO pelo usuário ou sistema');
-  } else if (details.status === 'in_process') {
-    console.log('[WEBHOOK] 🔄 Pagamento em PROCESSAMENTO/ANÁLISE');
-  } else {
-    console.log(`[WEBHOOK] 📋 Pagamento com status: ${details.status} - monitorando...`);
+    // Registrar evento de webhook
+    webhookEvent = await paymentService.logWebhookEvent(
+      dbPayment.id,
+      type || 'payment.updated',
+      body
+    );
+    
+    console.log('[WEBHOOK] 📝 Evento de webhook registrado:', webhookEvent.id);
+    
+  } catch (dbError) {
+    console.error('[WEBHOOK] ❌ Erro ao salvar no banco de dados:', dbError);
+    // Continuar processamento mesmo com erro no banco
   }
 
-  // 3) Retornar ACK
-  const response = {
-    success: true,
-    message: 'Webhook processado com sucesso',
-    paymentId,
-    status: details.status,
-    external_reference: details.external_reference,
-    processed_at: new Date().toISOString(),
-  };
-  
-  console.log('[WEBHOOK] ===== RESPOSTA DO WEBHOOK =====');
-  console.log('[WEBHOOK] Response:', response);
-  
-  return NextResponse.json(response, { status: 200 });
+  // Atualize seu banco aqui (pelo external_reference / id), se desejar.
+
+  // Envia e-mail somente quando aprovado
+  if (details.status === 'approved') {
+    if (wasRecentlySent(String(details.id))) {
+      console.log('[WEBHOOK] ⏭️ e-mail já enviado recentemente, ignorando duplicado');
+    } else {
+      const to = pickBuyerEmail(details);
+      const name = pickName(details);
+      const orderId =
+        details?.external_reference ||
+        details?.metadata?.order_id ||
+        String(details.id);
+      const items = pickItems(details);
+      const amount = Number(details?.transaction_amount || 0);
+      const receiptUrl = details?.point_of_interaction?.transaction_data?.ticket_url ?? undefined;
+
+      console.log('[WEBHOOK] 📧 preparando e-mail', { to, orderId, amount, items: items.length });
+
+      if (to) {
+        try {
+          const res = await sendPaymentConfirmationEmail({
+            to,
+            name,
+            orderId,
+            amount,
+            items,
+            receiptUrl,
+          });
+          markSent(String(details.id));
+          console.log('[WEBHOOK] ✅ e-mail enviado', {
+            to,
+            messageId: (res as any)?.messageId,
+          });
+        } catch (err) {
+          console.error('[WEBHOOK] ❌ falha ao enviar e-mail', err);
+        }
+      } else {
+        console.warn('[WEBHOOK] ⚠️ e-mail do comprador não encontrado/é placeholder — não enviado');
+      }
+    }
+  } else if (details.status === 'rejected') {
+    console.log('[WEBHOOK] ❌ pagamento rejeitado', {
+      id: details.id,
+      status_detail: (details as any).status_detail,
+    });
+  } else if (details.status === 'in_process') {
+    console.log('[WEBHOOK] ⏳ pagamento em análise/processamento');
+  } else if (details.status === 'cancelled') {
+    console.log('[WEBHOOK] ⏹️ pagamento cancelado');
+  } else {
+    console.log('[WEBHOOK] 📋 status:', details.status);
+  }
+
+  // Marcar webhook como processado
+  try {
+    if (dbPayment && webhookEvent) {
+      await paymentService.markWebhookProcessed(webhookEvent.id);
+      console.log('[WEBHOOK] ✅ Webhook marcado como processado');
+    }
+  } catch (markError) {
+    console.error('[WEBHOOK] ❌ Erro ao marcar webhook como processado:', markError);
+  }
+
+  return NextResponse.json(
+    {
+      ok: true,
+      paymentId,
+      status: details.status,
+      external_reference: details.external_reference,
+      processed_at: new Date().toISOString(),
+      saved_to_db: !!dbPayment,
+    },
+    { status: 200 }
+  );
 }
 
-// Healthcheck simples
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   return NextResponse.json({

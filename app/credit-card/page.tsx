@@ -49,6 +49,13 @@ function CardBrick(props: {
           },
           onSubmit: async (cardFormData: any) => {
             try {
+              console.log('[Brick] 📝 Enviando dados do cartão...');
+              console.log('[Brick] 👤 Dados do cliente:', {
+                name: buyer.name,
+                email: buyer.email,
+                cpf: buyer.cpf
+              });
+              
               const res = await fetch('/api/mercadopago/card', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -61,12 +68,23 @@ function CardBrick(props: {
                   description: 'Pedido na Minha Loja',
                   external_reference: `order_${Date.now()}`,
                   payer: {
+                    name: buyer.name, // ✅ Incluir nome do cliente
                     email: buyer.email,
                     identification: { type: 'CPF', number: buyer.cpf.replace(/\D/g, '') },
                   },
                 }),
               });
+              
               const data = await res.json();
+              console.log('[Brick] ✅ Pagamento processado:', data);
+              
+              // Verificar se foi salvo no banco
+              if (data.saved_to_db) {
+                console.log('[Brick] 💾 Dados salvos no banco com sucesso');
+              } else {
+                console.warn('[Brick] ⚠️ Dados não foram salvos no banco');
+              }
+              
               onResult(data);
             } catch (e: any) {
               console.error('[Submit error]', e);
@@ -153,8 +171,8 @@ export default function CreditCardPage() {
   const router = useRouter();
 
   const [amount, setAmount] = useState<number>(199.9);
-  const [name, setName] = useState<string>('Cliente Teste');
-  const [email, setEmail] = useState<string>('cliente@example.com');
+  const [name, setName] = useState<string>('Diogo Vitalis');
+  const [email, setEmail] = useState<string>('diogovitalisdev@gmail.com');
   const [cpf, setCpf] = useState<string>('123.456.789-09');
 
   const [result, setResult] = useState<any>(null);

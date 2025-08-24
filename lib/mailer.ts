@@ -1,90 +1,159 @@
-import nodemailer from 'nodemailer';
+// lib/mailer.ts
+import nodemailer, { SentMessageInfo } from 'nodemailer';
 
-const from = process.env.MAIL_FROM || 'no-reply@example.com';
+const {
+  SMTP_HOST,
+  SMTP_PORT,
+  SMTP_USER,
+  SMTP_PASS,
+  MAIL_FROM,
+} = process.env;
 
-export async function getTransport() {
-  // Produção → usa seu SMTP real
-  if (process.env.NODE_ENV === 'production') {
-    return nodemailer.createTransport({
-      host: process.env.SMTP_HOST!,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: Number(process.env.SMTP_PORT || 587) === 465, // 465 = SSL
-      auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
-    });
+// --- Validação das variáveis de ambiente (falha explícita ajuda a depurar) ---
+function assertEnv() {
+  const missing: string[] = [];
+  if (!SMTP_HOST) missing.push('SMTP_HOST');
+  if (!SMTP_PORT) missing.push('SMTP_PORT');
+  if (!SMTP_USER) missing.push('SMTP_USER');
+  if (!SMTP_PASS) missing.push('SMTP_PASS');
+
+  if (missing.length) {
+    const msg =
+      `[mailer] Variáveis SMTP ausentes: ${missing.join(', ')}. ` +
+      `Configure-as no .env.`;
+    console.error(msg);
+    throw new Error(msg);
   }
-
-  // Desenvolvimento → conta Ethereal (preview no navegador)
-  const test = await nodemailer.createTestAccount();
-  return nodemailer.createTransport({
-    host: 'smtp.ethereal.email',
-    port: 587,
-    auth: { user: test.user, pass: test.pass },
-  });
 }
 
-type LineItem = { title: string; quantity: number; unit_price: number };
+// --- Transporter (singleton) ---
+let transporter: nodemailer.Transporter | null = null;
 
-export async function sendPaymentConfirmationEmail(args: {
+function getTransporter() {
+  if (!transporter) {
+    assertEnv();
+    transporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: Number(SMTP_PORT) || 587,
+      secure: Number(SMTP_PORT) === 465, // 465 = SSL
+      auth: { user: SMTP_USER as string, pass: SMTP_PASS as string },
+      // pool: true, // opcional: habilite se for enviar muitos e-mails
+    });
+  }
+  return transporter!;
+}
+
+// Verifica conexão SMTP uma única vez (gera log claro se algo falhar)
+let verifiedOnce = false;
+async function ensureVerified() {
+  if (verifiedOnce) return;
+  try {
+    await getTransporter().verify();
+    console.log('[mailer] SMTP verificado com sucesso');
+    verifiedOnce = true;
+  } catch (err) {
+    console.error('[mailer] Falha ao verificar SMTP:', err);
+    throw err;
+  }
+}
+
+export type MailItem = { title: string; quantity: number; unit_price: number };
+
+function brl(n: number) {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(n || 0);
+}
+
+function buildItemsTable(items: MailItem[]) {
+  if (!items?.length) return '';
+  return `
+    <table style="width:100%;border-collapse:collapse;margin-top:12px">
+      <thead>
+        <tr>
+          <th style="text-align:left;padding:8px;border-bottom:1px solid #eee">Item</th>
+          <th style="text-align:center;padding:8px;border-bottom:1px solid #eee">Qtd</th>
+          <th style="text-align:right;padding:8px;border-bottom:1px solid #eee">Preço</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${items
+          .map(
+            (i) => `
+          <tr>
+            <td style="padding:8px;border-bottom:1px solid #f5f5f5">${i.title}</td>
+            <td style="padding:8px;text-align:center;border-bottom:1px solid #f5f5f5">${i.quantity}</td>
+            <td style="padding:8px;text-align:right;border-bottom:1px solid #f5f5f5">
+              ${brl((i.unit_price || 0) * (i.quantity || 1))}
+            </td>
+          </tr>`
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+export async function sendPaymentConfirmationEmail(opts: {
   to: string;
   name?: string;
-  orderId: string | number;
+  orderId: string;
   amount: number;
-  items?: LineItem[];
-  receiptUrl?: string;
-}) {
-  const { to, name, orderId, amount, items = [], receiptUrl } = args;
+  items?: MailItem[];
+  receiptUrl?: string | null | undefined;
+}): Promise<SentMessageInfo> {
+  assertEnv();
+  await ensureVerified();
 
-  const currency = (n: number) =>
-    n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-
-  const itemsHtml = items.length
-    ? `<table width="100%" cellpadding="8" cellspacing="0" style="border-collapse:collapse;border:1px solid #eee;">
-        <thead>
-          <tr style="background:#fafafa;">
-            <th align="left">Item</th>
-            <th align="right">Qtd</th>
-            <th align="right">Preço</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${items.map(it => `
-            <tr>
-              <td>${it.title}</td>
-              <td align="right">${it.quantity}</td>
-              <td align="right">${currency(it.unit_price)}</td>
-            </tr>`).join('')}
-        </tbody>
-      </table>`
-    : '';
+  const {
+    to,
+    name = 'Cliente',
+    orderId,
+    amount,
+    items = [],
+    receiptUrl,
+  } = opts;
 
   const html = `
-    <div style="font-family:Inter,Arial,sans-serif;max-width:640px;margin:0 auto;padding:24px;color:#111;">
-      <h2 style="margin:0 0 8px;">Pagamento confirmado ✅</h2>
-      <p style="margin:0 0 16px;">Olá${name ? `, <strong>${name}</strong>` : ''}! Recebemos seu pagamento.</p>
-      <div style="border:1px solid #eee;border-radius:8px;padding:16px;margin-bottom:16px;">
-        <p style="margin:4px 0;"><strong>Pedido:</strong> ${orderId}</p>
-        <p style="margin:4px 0;"><strong>Total:</strong> ${currency(amount)}</p>
-      </div>
-      ${itemsHtml}
-      ${receiptUrl ? `
-        <p style="margin:16px 0;">
-          <a href="${receiptUrl}" style="background:#111;color:#fff;text-decoration:none;padding:10px 14px;border-radius:6px;display:inline-block;">
-            Ver comprovante/nota
-          </a>
-        </p>` : ''}
-      <p style="margin-top:24px;color:#555;">Qualquer dúvida, responda este e-mail.</p>
-      <p style="margin:0;color:#999;font-size:12px;">Obrigado por comprar com a gente! 💙</p>
+    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;padding:16px">
+      <h2 style="margin:0 0 12px 0">Pagamento confirmado ✅</h2>
+      <p style="margin:0 0 12px 0">Olá, <strong>${name}</strong>!</p>
+      <p style="margin:0 0 12px 0">
+        Recebemos o seu pagamento do pedido <strong>${orderId}</strong>.
+      </p>
+
+      ${buildItemsTable(items)}
+
+      <p style="margin:12px 0 4px 0"><strong>Total:</strong> ${brl(amount)}</p>
+
+      ${
+        receiptUrl
+          ? `<p style="margin:12px 0"><a href="${receiptUrl}" target="_blank" rel="noopener noreferrer">Ver comprovante</a></p>`
+          : ''
+      }
+
+      <p style="margin-top:20px;color:#666;font-size:12px">
+        Se você não reconhece esta compra, entre em contato com nosso suporte.
+      </p>
     </div>
   `;
 
-  const transporter = await getTransport();
-  const info = await transporter.sendMail({
-    from,
+  const info = await getTransporter().sendMail({
+    from: MAIL_FROM || (SMTP_USER as string),
     to,
-    subject: `Confirmação do pagamento – Pedido ${orderId}`,
+    subject: `Pagamento confirmado – Pedido ${orderId}`,
+    text: `Olá, ${name}. Seu pagamento do pedido ${orderId} foi confirmado. Total: ${brl(
+      amount
+    )}.`,
     html,
   });
 
-  const previewUrl = (nodemailer as any).getTestMessageUrl?.(info) || null;
-  return { messageId: info.messageId, previewUrl };
+  console.log('[mailer] sendMail OK', {
+    messageId: info.messageId,
+    accepted: info.accepted,
+    rejected: info.rejected,
+  });
+
+  return info;
 }
